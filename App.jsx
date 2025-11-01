@@ -7,26 +7,27 @@ import {
   TouchableOpacity,
   StyleSheet,
   PermissionsAndroid,
+  ScrollView,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import Voice from '@react-native-voice/voice';
+import NetInfo from '@react-native-community/netinfo';
+import { NativeModules, NativeEventEmitter } from 'react-native';
 
-const WAKE_WORD = 'hi speech';
+const { SpeechModule } = NativeModules;
+const speechEmitter = new NativeEventEmitter(SpeechModule);
+
+const WAKE_WORD = 'Hello';
 
 const App = () => {
   const [isListening, setIsListening] = useState(false);
-  const [searchText, setSearchText] = useState('');
+  const [partialText, setPartialText] = useState('');
   const [resultText, setResultText] = useState('');
-  const [state, setState] = useState('Idle'); // internal tracking only
+  const [state, setState] = useState('Idle');
+  const [commands, setCommands] = useState([]);
   const wakeed = useRef(false);
 
   useEffect(() => {
-    Voice.onSpeechStart = onSpeechStart;
-    Voice.onSpeechEnd = onSpeechEnd;
-    Voice.onSpeechResults = onSpeechResults;
-    Voice.onSpeechError = onSpeechError;
-
-    const initPermissions = async () => {
+    const init = async () => {
       if (Platform.OS === 'android') {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
@@ -36,102 +37,88 @@ const App = () => {
             buttonNeutral: 'Ask Me Later',
             buttonNegative: 'Cancel',
             buttonPositive: 'OK',
-          }
+          },
         );
 
-        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-          console.log('🎤 Microphone permission granted');
-          startListening(); // start background listening
-        } else {
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
           console.log('🚫 Microphone permission denied');
           setState('Error');
+          return;
         }
-
-        const getService = await Voice.getSpeechRecognitionServices();
-        console.log('Speech recognition services:', getService);
       }
+
+      const online = await NetInfo.fetch();
+      if (!online.isConnected) {
+        setState('Offline');
+        console.log('⚠️ No internet connection');
+        return;
+      }
+
+      console.log('🎤 Starting continuous listening...');
+      SpeechModule.startContinuousListening();
+      setIsListening(true);
     };
 
-    initPermissions();
+    init();
+
+    const sub = speechEmitter.addListener('SpeechEvent', ({ type, data }) => {
+      if (!data) return;
+
+      const spoken = data.toLowerCase().trim();
+
+      // show partial updates
+      if (type === 'PARTIAL') {
+        setPartialText(spoken);
+      }
+
+      // handle results
+      if (type === 'RESULT') {
+        console.log('🗣 Heard:', spoken);
+
+        if (!wakeed.current && spoken.includes(WAKE_WORD)) {
+          wakeed.current = true;
+          setState('Awake');
+          setResultText('✅ Wake word detected! Listening to you now...');
+          setPartialText('');
+          return;
+        }
+
+        // after wake word → continuously collect
+        if (wakeed.current) {
+          setCommands(prev => [...prev, spoken]);
+          setResultText(`🎤 You said: ${spoken}`);
+          setState('Listening...');
+        }
+      }
+
+      if (type.startsWith('ERROR')) {
+        console.log('Speech error:', data);
+        setState('Error');
+      }
+
+      if (type === 'STATE') setState(data);
+    });
 
     return () => {
-      Voice.destroy().then(Voice.removeAllListeners);
+      sub.remove();
+      SpeechModule.stopListening();
     };
   }, []);
 
-  const onSpeechStart = () => {
-    console.log('Recording started');
-    setState('Listening');
-  };
-
-  const onSpeechEnd = () => {
-    console.log('Recording ended');
-    setIsListening(false);
-    if (!wakeed.current) {
-      // Restart listening automatically
-      setTimeout(() => startListening(), 600);
-    }
-  };
-
-  const onSpeechResults = (e) => {
-    const results = e?.value || [];
-    if (results.length === 0) return;
-
-    const text = results.join(' ').toLowerCase();
-    console.log('Speech Results:', text);
-    setSearchText(results[0]);
-
-    // If already awake, capture next command
-    if (wakeed.current) {
-      wakeed.current = false;
-      setState('Processing');
-      setResultText(results[0]);
-      setState('Result');
-      setTimeout(() => startListening(), 1000);
-      return;
-    }
-
-    // Check for wake word
-    if (text.includes(WAKE_WORD)) {
-      wakeed.current = true;
-      setState('Awake');
-      console.log('✅ Wake word detected! Listening for next command...');
-      return;
-    }
-
-    setState('Listening');
-  };
-
-  const onSpeechError = (error) => {
-    console.log('onSpeechError:', error);
-    setState('Error');
-    setIsListening(false);
-    setTimeout(() => startListening(), 1500);
-  };
-
-  const startListening = async () => {
-    try {
-      await Voice.start('en-US');
-      setIsListening(true);
-      setState('Listening');
-    } catch (error) {
-      console.log('Start Listening Error:', error);
-      setState('Error');
-    }
-  };
-
-  const stopListening = async () => {
-    try {
-      await Voice.stop();
+  const toggleListening = () => {
+    if (isListening) {
+      SpeechModule.stopListening();
       setIsListening(false);
       setState('Idle');
-    } catch (error) {
-      console.log('Stop Listening Error:', error);
-      setState('Error');
+      wakeed.current = false;
+    } else {
+      SpeechModule.startContinuousListening();
+      setIsListening(true);
+      setState('Listening for Wake Word');
     }
   };
 
-  // ---------- UI ----------
+  // ---------- UI (unchanged) ----------
   const styles = StyleSheet.create({
     maincontainer: { flex: 1, alignItems: 'center', padding: 16, backgroundColor: 'white' },
     container: {
@@ -156,25 +143,35 @@ const App = () => {
       textAlign: 'center',
       paddingHorizontal: 16,
     },
+    stateText: { marginTop: 8, fontSize: 14, color: '#666' },
+    commandList: { marginTop: 20, width: '100%', paddingHorizontal: 20 },
+    commandItem: {
+      fontSize: 16,
+      color: '#333',
+      paddingVertical: 6,
+      borderBottomWidth: 0.5,
+      borderColor: '#ccc',
+    },
+    partialText: {
+      color: '#888',
+      fontSize: 15,
+      marginTop: 10,
+      fontStyle: 'italic',
+    },
   });
 
   return (
     <View style={styles.maincontainer}>
       <View style={styles.container}>
         <TextInput
-          placeholder="Tap mic or say wake word..."
-          value={searchText}
-          onChangeText={setSearchText}
+          placeholder="Say wake word or tap mic..."
+          value={partialText}
+          onChangeText={setPartialText}
           style={styles.input}
           placeholderTextColor="#888"
         />
 
-        <TouchableOpacity
-          onPress={() => {
-            isListening ? stopListening() : startListening();
-          }}
-          style={styles.iconContainer}
-        >
+        <TouchableOpacity onPress={toggleListening} style={styles.iconContainer}>
           {isListening ? (
             <View style={styles.dotsContainer}>
               <View style={styles.dot} />
@@ -187,17 +184,25 @@ const App = () => {
         </TouchableOpacity>
       </View>
 
-      {/* Hide hint when awake or processing */}
+      <Text style={styles.stateText}>🎧 State: {state}</Text>
+
       {state !== 'Awake' && state !== 'Processing' && (
-        <Text style={styles.hint}>
-          Say: "{WAKE_WORD}" to wake the app, then speak a short command.
-        </Text>
+        <Text style={styles.hint}>Say "{WAKE_WORD}" once, then speak freely — it will keep recording your sentences.</Text>
       )}
 
-      {/* Show recognized command/result below */}
-      {resultText ? (
-        <Text style={styles.resultText}>You said: {resultText}</Text>
+      {resultText ? <Text style={styles.resultText}>{resultText}</Text> : null}
+
+      {wakeed.current && partialText ? (
+        <Text style={styles.partialText}>🎤 Listening: {partialText}</Text>
       ) : null}
+
+      <ScrollView style={styles.commandList}>
+        {commands.map((cmd, i) => (
+          <Text key={i} style={styles.commandItem}>
+            • {cmd}
+          </Text>
+        ))}
+      </ScrollView>
     </View>
   );
 };
