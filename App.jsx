@@ -16,7 +16,7 @@ import { NativeModules, NativeEventEmitter } from 'react-native';
 const { SpeechModule } = NativeModules;
 const speechEmitter = new NativeEventEmitter(SpeechModule);
 
-const WAKE_WORD = 'Hello';
+const WAKE_WORD = 'hello';
 
 const App = () => {
   const [isListening, setIsListening] = useState(false);
@@ -25,6 +25,7 @@ const App = () => {
   const [state, setState] = useState('Idle');
   const [commands, setCommands] = useState([]);
   const wakeed = useRef(false);
+  const isSpeaking = useRef(false);
 
   useEffect(() => {
     const init = async () => {
@@ -66,15 +67,19 @@ const App = () => {
 
       const spoken = data.toLowerCase().trim();
 
-      // show partial updates
+      // ✅ Show partial live text
       if (type === 'PARTIAL') {
         setPartialText(spoken);
+        if (wakeed.current) {
+          isSpeaking.current = true;
+        }
       }
 
-      // handle results
+      // ✅ Handle result
       if (type === 'RESULT') {
         console.log('🗣 Heard:', spoken);
 
+        // Step 1: Detect wake word once
         if (!wakeed.current && spoken.includes(WAKE_WORD)) {
           wakeed.current = true;
           setState('Awake');
@@ -83,11 +88,12 @@ const App = () => {
           return;
         }
 
-        // after wake word → continuously collect
+        // Step 2: After wake word → keep collecting all spoken commands
         if (wakeed.current) {
           setCommands(prev => [...prev, spoken]);
           setResultText(`🎤 You said: ${spoken}`);
           setState('Listening...');
+          isSpeaking.current = false;
         }
       }
 
@@ -111,6 +117,7 @@ const App = () => {
       setIsListening(false);
       setState('Idle');
       wakeed.current = false;
+      setCommands([]);
     } else {
       SpeechModule.startContinuousListening();
       setIsListening(true);
@@ -186,8 +193,8 @@ const App = () => {
 
       <Text style={styles.stateText}>🎧 State: {state}</Text>
 
-      {state !== 'Awake' && state !== 'Processing' && (
-        <Text style={styles.hint}>Say "{WAKE_WORD}" once, then speak freely — it will keep recording your sentences.</Text>
+      {!wakeed.current && (
+        <Text style={styles.hint}>Say "{WAKE_WORD}" once — then speak freely; it will keep recording.</Text>
       )}
 
       {resultText ? <Text style={styles.resultText}>{resultText}</Text> : null}
